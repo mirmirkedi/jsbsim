@@ -55,6 +55,23 @@
 #include "DrawDebugHelpers.h"
 #include "GeoReferencingSystem.h"
 #include "Components/ActorComponent.h"
+#include "GameFramework/PlayerController.h"
+#include "InputCoreTypes.h"
+
+namespace
+{
+constexpr double InputTraceTolerance = 1e-3;
+
+bool DidValueChange(double Previous, double Current)
+{
+  return !FMath::IsNearlyEqual(Previous, Current, InputTraceTolerance);
+}
+
+bool IsPressed(double Value)
+{
+  return FMath::Abs(Value) > InputTraceTolerance;
+}
+}
 
 
 // Utility class and static member to redirect cout to UE_LOG - see in UJSBSimMovementComponent::UJSBSimMovementComponent()
@@ -323,6 +340,8 @@ void UJSBSimMovementComponent::TickComponent(float DeltaTime, ELevelTick TickTyp
     }
     else
     {
+      LogPhysicalKeyPresses();
+      LogTrackedInputChanges();
 
       //calculate sim rate to be 120hz independent of game tick rate(Pseudo fixed rate, dev/user needs to set game to a fixed rate too)
       simDtime = 120.f / (1.f / DeltaTime);
@@ -635,6 +654,11 @@ void UJSBSimMovementComponent::PrepareJSBSim()
 
   // Aircraft Trim done - Get result state
   CopyFromJSBSim();
+  LastLoggedCommands = Commands;
+  LastLoggedEngineCommands = EngineCommands;
+  bInputTraceInitialized = true;
+
+  UE_LOG(LogJSBSim, Warning, TEXT("[Input] Active controls: LeftMouseButton=Toggle parking brake, Ctrl+Q=Starter, Ctrl+E=Engine running, 8=Flaps extend, 5=Flaps retract, 4=Throttle full, 2=Throttle decrease, Z/X=Rudder left/right, Up=Elevator pull-up, G=Gear toggle"));
 }
 
 void UJSBSimMovementComponent::DeInitializeJSBSim()
@@ -725,6 +749,172 @@ void UJSBSimMovementComponent::CopyToJSBSim()
 
   CopyTankPropertiesToJSBSim();
   CopyGearPropertiesToJSBSim();
+}
+
+void UJSBSimMovementComponent::LogTrackedInputChanges()
+{
+  if (!bInputTraceInitialized)
+  {
+    LastLoggedCommands = Commands;
+    LastLoggedEngineCommands = EngineCommands;
+    bInputTraceInitialized = true;
+    return;
+  }
+
+  if (DidValueChange(LastLoggedCommands.ParkingBrake, Commands.ParkingBrake))
+  {
+    const bool bBrakeEnabled = Commands.ParkingBrake > 0.5;
+    UE_LOG(LogJSBSim, Warning, TEXT("[Input] LeftMouseButton press start -> Parking brake %s"),
+      bBrakeEnabled ? TEXT("ENGAGED") : TEXT("RELEASED"));
+  }
+
+  if (DidValueChange(LastLoggedCommands.Flap, Commands.Flap))
+  {
+    const bool bExtending = Commands.Flap > LastLoggedCommands.Flap;
+    UE_LOG(LogJSBSim, Warning, TEXT("[Input] %s press start -> Flaps %s (command %.2f)"),
+      bExtending ? TEXT("8") : TEXT("5"),
+      bExtending ? TEXT("EXTENDING") : TEXT("RETRACTING"),
+      Commands.Flap);
+  }
+
+  if (DidValueChange(LastLoggedCommands.GearDown, Commands.GearDown))
+  {
+    const bool bGearDown = Commands.GearDown > 0.5;
+    UE_LOG(LogJSBSim, Warning, TEXT("[Input] G press start -> Landing gear %s"),
+      bGearDown ? TEXT("LOWERING") : TEXT("RAISING"));
+  }
+
+  if (!IsPressed(LastLoggedCommands.Rudder) && IsPressed(Commands.Rudder))
+  {
+    const TCHAR* DirectionKey = Commands.Rudder < 0.0 ? TEXT("Z") : TEXT("X");
+    const TCHAR* Direction = Commands.Rudder < 0.0 ? TEXT("LEFT") : TEXT("RIGHT");
+    UE_LOG(LogJSBSim, Warning, TEXT("[Input] %s press start -> Rudder %s for runway tracking (command %.2f)"),
+      DirectionKey, Direction, Commands.Rudder);
+  }
+  else if (IsPressed(LastLoggedCommands.Rudder) && !IsPressed(Commands.Rudder))
+  {
+    UE_LOG(LogJSBSim, Warning, TEXT("[Input] Z/X released -> Rudder centered"));
+  }
+
+  if (!IsPressed(LastLoggedCommands.Elevator) && IsPressed(Commands.Elevator))
+  {
+    const TCHAR* DirectionKey = Commands.Elevator > 0.0 ? TEXT("Up") : TEXT("Down");
+    const TCHAR* Action = Commands.Elevator > 0.0 ? TEXT("nose-up rotation started") : TEXT("nose-down input started");
+    UE_LOG(LogJSBSim, Warning, TEXT("[Input] %s press start -> Elevator input, %s (command %.2f)"),
+      DirectionKey, Action, Commands.Elevator);
+  }
+  else if (IsPressed(LastLoggedCommands.Elevator) && !IsPressed(Commands.Elevator))
+  {
+    UE_LOG(LogJSBSim, Warning, TEXT("[Input] Up/Down released -> Elevator centered"));
+  }
+
+  const int32 EngineCount = FMath::Min(LastLoggedEngineCommands.Num(), EngineCommands.Num());
+  for (int32 i = 0; i < EngineCount; ++i)
+  {
+    const FEngineCommand& Previous = LastLoggedEngineCommands[i];
+    const FEngineCommand& Current = EngineCommands[i];
+
+    if (Previous.Starter != Current.Starter)
+    {
+      UE_LOG(LogJSBSim, Warning, TEXT("[Input] Ctrl+Q press start -> Engine %d starter %s"),
+        i + 1, Current.Starter ? TEXT("ON") : TEXT("OFF"));
+    }
+
+    if (Previous.Running != Current.Running)
+    {
+      UE_LOG(LogJSBSim, Warning, TEXT("[Input] Ctrl+E press start -> Engine %d running %s"),
+        i + 1, Current.Running ? TEXT("ON") : TEXT("OFF"));
+    }
+
+    if (DidValueChange(Previous.Throttle, Current.Throttle))
+    {
+      if (Current.Throttle > 0.99 && Previous.Throttle <= 0.99)
+      {
+        UE_LOG(LogJSBSim, Warning, TEXT("[Input] 4 press start -> Engine %d throttle FULL (%.2f)"),
+          i + 1, Current.Throttle);
+      }
+      else if (Current.Throttle < Previous.Throttle)
+      {
+        UE_LOG(LogJSBSim, Warning, TEXT("[Input] 2 press start -> Engine %d throttle reduced to %.2f"),
+          i + 1, Current.Throttle);
+      }
+    }
+  }
+
+  LastLoggedCommands = Commands;
+  LastLoggedEngineCommands = EngineCommands;
+}
+
+void UJSBSimMovementComponent::LogPhysicalKeyPresses()
+{
+  UWorld* World = GetWorld();
+  if (!World)
+  {
+    return;
+  }
+
+  APlayerController* PlayerController = World->GetFirstPlayerController();
+  if (!PlayerController)
+  {
+    return;
+  }
+
+  const bool bCtrlDown = PlayerController->IsInputKeyDown(EKeys::LeftControl) || PlayerController->IsInputKeyDown(EKeys::RightControl);
+
+  if (PlayerController->WasInputKeyJustPressed(EKeys::LeftMouseButton))
+  {
+    UE_LOG(LogJSBSim, Warning, TEXT("[Input] LeftMouseButton press start -> Toggle parking brake requested"));
+  }
+
+  if (PlayerController->WasInputKeyJustPressed(EKeys::G))
+  {
+    UE_LOG(LogJSBSim, Warning, TEXT("[Input] G press start -> Toggle landing gear requested"));
+  }
+
+  if (PlayerController->WasInputKeyJustPressed(EKeys::Eight))
+  {
+    UE_LOG(LogJSBSim, Warning, TEXT("[Input] 8 press start -> Flaps extend requested"));
+  }
+
+  if (PlayerController->WasInputKeyJustPressed(EKeys::Five))
+  {
+    UE_LOG(LogJSBSim, Warning, TEXT("[Input] 5 press start -> Flaps retract requested"));
+  }
+
+  if (PlayerController->WasInputKeyJustPressed(EKeys::Four))
+  {
+    UE_LOG(LogJSBSim, Warning, TEXT("[Input] 4 press start -> Full throttle requested"));
+  }
+
+  if (PlayerController->WasInputKeyJustPressed(EKeys::Two))
+  {
+    UE_LOG(LogJSBSim, Warning, TEXT("[Input] 2 press start -> Throttle decrease requested"));
+  }
+
+  if (PlayerController->WasInputKeyJustPressed(EKeys::Z))
+  {
+    UE_LOG(LogJSBSim, Warning, TEXT("[Input] Z press start -> Rudder left requested"));
+  }
+
+  if (PlayerController->WasInputKeyJustPressed(EKeys::X))
+  {
+    UE_LOG(LogJSBSim, Warning, TEXT("[Input] X press start -> Rudder right requested"));
+  }
+
+  if (PlayerController->WasInputKeyJustPressed(EKeys::Up))
+  {
+    UE_LOG(LogJSBSim, Warning, TEXT("[Input] Up press start -> Elevator pull-up requested"));
+  }
+
+  if (bCtrlDown && PlayerController->WasInputKeyJustPressed(EKeys::Q))
+  {
+    UE_LOG(LogJSBSim, Warning, TEXT("[Input] Ctrl+Q press start -> Starter toggle requested"));
+  }
+
+  if (bCtrlDown && PlayerController->WasInputKeyJustPressed(EKeys::E))
+  {
+    UE_LOG(LogJSBSim, Warning, TEXT("[Input] Ctrl+E press start -> Engine running toggle requested"));
+  }
 }
 
 void UJSBSimMovementComponent::CopyFromJSBSim()

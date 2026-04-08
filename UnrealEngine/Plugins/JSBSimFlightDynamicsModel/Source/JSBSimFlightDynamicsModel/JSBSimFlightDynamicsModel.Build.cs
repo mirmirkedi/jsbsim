@@ -26,7 +26,7 @@ public class JSBSimFlightDynamicsModel : ModuleRules
 		PublicDependencyModuleNames.AddRange(
 			new string[]
 			{
-				"Core", "CoreUObject", "Engine", 
+				"Core", "CoreUObject", "Engine", "InputCore",
 				"JSBSim",
 				"GeoReferencing",
 				"Projects"

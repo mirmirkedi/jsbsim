@@ -352,6 +352,8 @@ private:
 
 	/////////// Logging and Debugging Methods
 	void LogInitialization();
+	void LogPhysicalKeyPresses();
+	void LogTrackedInputChanges();
 
 
 	/**
@@ -359,6 +361,10 @@ private:
 	*/
 	void DrawDebugMessage();
 	void DrawDebugObjects();
+
+	bool bInputTraceInitialized = false;
+	FFlightControlCommands LastLoggedCommands;
+	TArray<struct FEngineCommand> LastLoggedEngineCommands;
 
 	/////////// In-Editor Specific
 
